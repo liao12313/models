@@ -31,6 +31,7 @@ import tensorflow as tf
 from official.bert import bert_models
 from official.bert import common_flags
 from official.bert import input_pipeline
+from official.bert import model_saving_utils
 from official.bert import model_training_utils
 from official.bert import modeling
 from official.bert import optimization
@@ -39,8 +40,13 @@ from official.bert import tokenization
 from official.utils.misc import keras_utils
 from official.utils.misc import tpu_lib
 
-flags.DEFINE_bool('do_train', False, 'Whether to run training.')
-flags.DEFINE_bool('do_predict', False, 'Whether to run eval on the dev set.')
+flags.DEFINE_enum(
+    'mode', 'train', ['train', 'predict', 'export_only'],
+    'One of {"train", "predict", "export_only"}. `train`: '
+    'trains the model and evaluates in the meantime. '
+    '`predict`: predict answers from the squad json file. '
+    '`export_only`: will take the latest checkpoint inside '
+    'model_dir and export a `SavedModel`.')
 flags.DEFINE_string('train_data_path', '',
                     'Training data path with train tfrecords.')
 flags.DEFINE_string(
@@ -220,13 +226,23 @@ def train_squad(strategy,
       squad_model.optimizer = (
           tf.keras.mixed_precision.experimental.LossScaleOptimizer(
               squad_model.optimizer, loss_scale=common_flags.get_loss_scale()))
+    if FLAGS.fp16_implementation == 'graph_rewrite':
+      # Note: when flags_obj.fp16_implementation == "graph_rewrite", dtype as
+      # determined by flags_core.get_tf_dtype(flags_obj) would be 'float32'
+      # which will ensure tf.compat.v2.keras.mixed_precision and
+      # tf.train.experimental.enable_mixed_precision_graph_rewrite do not double
+      # up.
+      squad_model.optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(
+          squad_model.optimizer)
     return squad_model, core_model
 
   # The original BERT model does not scale the loss by
   # 1/num_replicas_in_sync. It could be an accident. So, in order to use
   # the same hyper parameter, we do the same thing here by keeping each
   # replica loss as it is.
-  loss_fn = get_loss_fn(loss_factor=1.0)
+  loss_fn = get_loss_fn(
+      loss_factor=1.0 /
+      strategy.num_replicas_in_sync if FLAGS.scale_loss else 1.0)
   use_remote_tpu = (FLAGS.strategy_type == 'tpu' and FLAGS.tpu)
 
   model_training_utils.run_customized_training_loop(
@@ -311,6 +327,26 @@ def predict_squad(strategy, input_meta_data):
       verbose=FLAGS.verbose_logging)
 
 
+def export_squad(model_export_path, input_meta_data):
+  """Exports a trained model as a `SavedModel` for inference.
+
+  Args:
+    model_export_path: a string specifying the path to the SavedModel directory.
+    input_meta_data: dictionary containing meta data about input and model.
+
+  Raises:
+    Export path is not specified, got an empty string or None.
+  """
+  if not model_export_path:
+    raise ValueError('Export path is not specified: %s' % model_export_path)
+  bert_config = modeling.BertConfig.from_json_file(FLAGS.bert_config_file)
+
+  squad_model, _ = bert_models.squad_model(
+      bert_config, input_meta_data['max_seq_length'], float_type=tf.float32)
+  model_saving_utils.export_bert_model(
+      model_export_path, model=squad_model, checkpoint_dir=FLAGS.model_dir)
+
+
 def main(_):
   # Users should always run this script under TF 2.x
   assert tf.version.VERSION.startswith('2.')
@@ -318,9 +354,15 @@ def main(_):
   with tf.io.gfile.GFile(FLAGS.input_meta_data_path, 'rb') as reader:
     input_meta_data = json.loads(reader.read().decode('utf-8'))
 
+  if FLAGS.mode == 'export_only':
+    export_squad(FLAGS.model_export_path, input_meta_data)
+    return
+
   strategy = None
   if FLAGS.strategy_type == 'mirror':
     strategy = tf.distribute.MirroredStrategy()
+  elif FLAGS.strategy_type == 'multi_worker_mirror':
+    strategy = tf.distribute.experimental.MultiWorkerMirroredStrategy()
   elif FLAGS.strategy_type == 'tpu':
     # Initialize TPU System.
     cluster_resolver = tpu_lib.tpu_initialize(FLAGS.tpu)
@@ -328,9 +370,9 @@ def main(_):
   else:
     raise ValueError('The distribution strategy type is not supported: %s' %
                      FLAGS.strategy_type)
-  if FLAGS.do_train:
+  if FLAGS.mode == 'train':
     train_squad(strategy, input_meta_data)
-  if FLAGS.do_predict:
+  if FLAGS.mode == 'predict':
     predict_squad(strategy, input_meta_data)
 
 

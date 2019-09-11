@@ -43,6 +43,7 @@ SQUAD_FULL_INPUT_META_DATA_PATH = 'gs://tf-perfzero-data/bert/squad/squad_full_m
 MODEL_CONFIG_FILE_PATH = 'gs://cloud-tpu-checkpoints/bert/tf_20/uncased_L-24_H-1024_A-16/bert_config'
 # pylint: enable=line-too-long
 
+TMP_DIR = os.getenv('TMPDIR')
 FLAGS = flags.FLAGS
 
 
@@ -116,7 +117,7 @@ class BertSquadBenchmarkReal(BertSquadBenchmarkBase):
   `benchmark_(number of gpus)_gpu` format.
   """
 
-  def __init__(self, output_dir=None, **kwargs):
+  def __init__(self, output_dir=TMP_DIR, **kwargs):
     super(BertSquadBenchmarkReal, self).__init__(output_dir=output_dir)
 
   def _setup(self):
@@ -277,6 +278,42 @@ class BertSquadBenchmarkReal(BertSquadBenchmarkBase):
     FLAGS.train_batch_size = 32
     FLAGS.dtype = 'fp16'
     FLAGS.loss_scale = 'dynamic'
+
+    self._run_and_report_benchmark()
+
+  def benchmark_1_gpu_amp(self):
+    """Tests BERT SQuAD model performance with 1 GPU with automatic mixed precision."""
+
+    self._setup()
+    self.num_gpus = 1
+    FLAGS.model_dir = self._get_model_dir('benchmark_1_gpu_amp_squad')
+    FLAGS.train_batch_size = 4
+    FLAGS.dtype = 'fp16'
+    FLAGS.fp16_implementation = 'graph_rewrite'
+
+    self._run_and_report_benchmark()
+
+  def benchmark_4_gpu_amp(self):
+    """Tests BERT SQuAD model performance with 1 GPU with automatic mixed precision."""
+
+    self._setup()
+    self.num_gpus = 4
+    FLAGS.model_dir = self._get_model_dir('benchmark_4_gpu_amp_squad')
+    FLAGS.train_batch_size = 16
+    FLAGS.dtype = 'fp16'
+    FLAGS.fp16_implementation = 'graph_rewrite'
+
+    self._run_and_report_benchmark()
+
+  def benchmark_8_gpu_amp(self):
+    """Tests BERT SQuAD model performance with 1 GPU with automatic mixed precision."""
+
+    self._setup()
+    self.num_gpus = 8
+    FLAGS.model_dir = self._get_model_dir('benchmark_8_gpu_amp_squad')
+    FLAGS.train_batch_size = 32
+    FLAGS.dtype = 'fp16'
+    FLAGS.fp16_implementation = 'graph_rewrite'
 
     self._run_and_report_benchmark()
 

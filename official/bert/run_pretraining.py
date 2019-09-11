@@ -94,11 +94,11 @@ def get_pretrain_input_data(input_file_pattern, seq_length,
   return _dataset_fn if use_dataset_fn else _dataset_fn()
 
 
-def get_loss_fn(loss_scale=1.0):
+def get_loss_fn(loss_factor=1.0):
   """Returns loss function for BERT pretraining."""
 
   def _bert_pretrain_loss_fn(unused_labels, losses, **unused_args):
-    return tf.keras.backend.mean(losses) * loss_scale
+    return tf.keras.backend.mean(losses) * loss_factor
 
   return _bert_pretrain_loss_fn
 
@@ -123,16 +123,27 @@ def run_customized_training(strategy,
                                      train_batch_size, strategy)
 
   def _get_pretrain_model():
+    """Gets a pretraining model."""
     pretrain_model, core_model = bert_models.pretrain_model(
         bert_config, max_seq_length, max_predictions_per_seq)
     pretrain_model.optimizer = optimization.create_optimizer(
         initial_lr, steps_per_epoch * epochs, warmup_steps)
+    if FLAGS.fp16_implementation == 'graph_rewrite':
+      # Note: when flags_obj.fp16_implementation == "graph_rewrite", dtype as
+      # determined by flags_core.get_tf_dtype(flags_obj) would be 'float32'
+      # which will ensure tf.compat.v2.keras.mixed_precision and
+      # tf.train.experimental.enable_mixed_precision_graph_rewrite do not double
+      # up.
+      pretrain_model.optimizer = tf.train.experimental.enable_mixed_precision_graph_rewrite(
+          pretrain_model.optimizer)
     return pretrain_model, core_model
 
   trained_model = model_training_utils.run_customized_training_loop(
       strategy=strategy,
       model_fn=_get_pretrain_model,
-      loss_fn=get_loss_fn(),
+      loss_fn=get_loss_fn(
+          loss_factor=1.0 /
+          strategy.num_replicas_in_sync if FLAGS.scale_loss else 1.0),
       model_dir=model_dir,
       train_input_fn=train_input_fn,
       steps_per_epoch=steps_per_epoch,
